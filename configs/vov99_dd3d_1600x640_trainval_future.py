@@ -93,11 +93,11 @@ test_pipeline = [
 
 data = dict(
     train=dict(
-        ann_file=['data/nuscenes/nuscenes_infos_train_sweep.pkl',
-                  'data/nuscenes/nuscenes_infos_val_sweep.pkl'],
+        ann_file=['/root/autodl-tmp/NuScenes/nuscenes_infos_train_sweep.pkl',
+                  '/root/autodl-tmp/NuScenes/nuscenes_infos_val_sweep.pkl'],
         pipeline=train_pipeline),
     val=dict(
-        ann_file='data/nuscenes/nuscenes_infos_val_sweep.pkl',  # use nuscenes_infos_test_sweep.pkl for submission
+        ann_file='/root/autodl-tmp/NuScenes/nuscenes_infos_val_sweep.pkl',  # use nuscenes_infos_test_sweep.pkl for submission
         pipeline=test_pipeline),
     test=dict(pipeline=test_pipeline)
 )
