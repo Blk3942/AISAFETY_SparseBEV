@@ -10,7 +10,7 @@ from pyquaternion import Quaternion
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data-root', default='data/nuscenes')
+parser.add_argument('--data-root', default='/root/autodl-tmp/NuScenes/')
 parser.add_argument('--version', default='v1.0-trainval')
 args = parser.parse_args()
 
