@@ -1,5 +1,5 @@
 dataset_type = 'CustomNuScenesDataset'
-dataset_root = 'data/nuscenes/'
+dataset_root = '/root/autodl-tmp/NuScenes/'
 
 input_modality = dict(
     use_lidar=False,
