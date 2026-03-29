@@ -1,0 +1,6 @@
+{
+  "description": "全 1 权重：与官方 accumulate + 等权类平均一致（用于回归对比）。",
+  "class_weights": {},
+  "ego_distance_bins": [],
+  "attribute_weights": {}
+}

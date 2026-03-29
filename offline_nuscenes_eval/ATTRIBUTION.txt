@@ -1,0 +1,7 @@
+This directory contains code derived from the nuScenes devkit (detection evaluation stack,
+utils/splits.py, utils/geometry_utils.py) and a minimal NuScenes DB loader (nuscenes/nuscenes_db.py)
+and Box helper (nuscenes/utils/box.py).
+
+Source: https://github.com/nutonomy/nuscenes-devkit
+License: Apache License 2.0
+Copyright (c) Motional and contributors.

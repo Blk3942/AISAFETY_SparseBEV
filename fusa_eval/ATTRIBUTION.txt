@@ -1,0 +1,12 @@
+This tree is a project copy of AISAFETY_SparseBEV/offline_nuscenes_eval for FUSA-only customization.
+tools/fusa_eval.py prepends this directory to sys.path (not offline_nuscenes_eval).
+
+---
+
+This directory contains code derived from the nuScenes devkit (detection evaluation stack,
+utils/splits.py, utils/geometry_utils.py) and a minimal NuScenes DB loader (nuscenes/nuscenes_db.py)
+and Box helper (nuscenes/utils/box.py).
+
+Source: https://github.com/nutonomy/nuscenes-devkit
+License: Apache License 2.0
+Copyright (c) Motional and contributors.

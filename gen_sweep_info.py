@@ -100,11 +100,19 @@ if __name__ == '__main__':
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_test_sweep.pkl'))
 
     elif args.version == 'v1.0-mini':
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_train_mini.pkl'), 'rb'))
+        # README / 旧流程: *_train_mini.pkl；MMDet3D create_nuscenes_infos 生成 *_train.pkl
+        train_pkl = os.path.join(args.data_root, 'nuscenes_infos_train_mini.pkl')
+        if not os.path.isfile(train_pkl):
+            train_pkl = os.path.join(args.data_root, 'nuscenes_infos_train.pkl')
+        val_pkl = os.path.join(args.data_root, 'nuscenes_infos_val_mini.pkl')
+        if not os.path.isfile(val_pkl):
+            val_pkl = os.path.join(args.data_root, 'nuscenes_infos_val.pkl')
+
+        sample_infos = pickle.load(open(train_pkl, 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_train_mini_sweep.pkl'))
 
-        sample_infos = pickle.load(open(os.path.join(args.data_root, 'nuscenes_infos_val_mini.pkl'), 'rb'))
+        sample_infos = pickle.load(open(val_pkl, 'rb'))
         sample_infos = add_sweep_info(nusc, sample_infos)
         mmcv.dump(sample_infos, os.path.join(args.data_root, 'nuscenes_infos_val_mini_sweep.pkl'))
 
