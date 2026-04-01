@@ -260,8 +260,10 @@ class SparseBEV(MVXTwoStageDetector):
         img = img.reshape(B, N//6, 6, C, H, W)
 
         img_filenames = img_metas[0]['filename']
-        num_frames = len(img_filenames) // 6
-        # assert num_frames == img.shape[1]
+        # Some dataloaders may provide filename lists for more frames than actually packed in `img`.
+        # Use the tensor shape as the source of truth to avoid out-of-bounds indexing.
+        num_frames = int(img.shape[1])
+        img_filenames = img_filenames[: num_frames * 6]
 
         img_shape = (H, W, C)
         img_metas[0]['img_shape'] = [img_shape for _ in range(len(img_filenames))]

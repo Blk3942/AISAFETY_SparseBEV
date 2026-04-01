@@ -7,7 +7,9 @@ import torch
 import torch.distributed
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
+from collections import OrderedDict
 from mmcv import Config
+from mmcv import DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import load_checkpoint
 from mmdet.apis import set_random_seed, multi_gpu_test, single_gpu_test
@@ -51,6 +53,7 @@ def main():
     parser = argparse.ArgumentParser(description='Validate a detector')
     parser.add_argument('--config', required=True)
     parser.add_argument('--weights', required=True)
+    parser.add_argument('--override', nargs='+', action=DictAction, help='覆盖 config（例如 data.val.data_root=...）')
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument('--batch_size', type=int, default=1)
@@ -58,6 +61,8 @@ def main():
 
     # parse configs
     cfgs = Config.fromfile(args.config)
+    if args.override is not None:
+        cfgs.merge_from_dict(args.override)
 
     # register custom module
     importlib.import_module('models')
@@ -119,11 +124,48 @@ def main():
     else:
         model = MMDataParallel(model, [0])
 
+    def _try_load_backbone_pretrain_into_sparsebev(weights_path: str) -> bool:
+        """
+        兼容仅包含 2D backbone 预训练权重的 checkpoint（key 形如 backbone.*）。
+        将其映射加载到 SparseBEV 的 img_backbone（非 strict），让验证流程至少可运行。
+        """
+        ckpt = torch.load(weights_path, map_location='cpu')
+        state_dict = ckpt.get('state_dict', ckpt) if isinstance(ckpt, dict) else None
+        if not isinstance(state_dict, dict):
+            return False
+
+        # detect backbone-only
+        keys = list(state_dict.keys())
+        if not keys or not all(k.startswith('backbone.') for k in keys):
+            return False
+
+        mapped = OrderedDict()
+        for k, v in state_dict.items():
+            mapped['img_backbone.' + k[len('backbone.'):]] = v
+
+        m = model.module  # MMDataParallel / DDP wrapper
+        if not hasattr(m, 'img_backbone'):
+            return False
+
+        missing, unexpected = m.load_state_dict(mapped, strict=False)
+        logging.warning(
+            'Loaded backbone-only weights into img_backbone (non-strict). '
+            f'missing={len(missing)}, unexpected={len(unexpected)}'
+        )
+        return True
+
     logging.info('Loading checkpoint from %s' % args.weights)
-    checkpoint = load_checkpoint(
-        model, args.weights, map_location='cuda', strict=True,
-        logger=logging.Logger(__name__, logging.ERROR)
-    )
+    try:
+        checkpoint = load_checkpoint(
+            model, args.weights, map_location='cuda', strict=True,
+            logger=logging.Logger(__name__, logging.ERROR)
+        )
+    except RuntimeError as e:
+        logging.warning('Strict checkpoint load failed, trying backbone-only fallback. Error: %s' % str(e))
+        ok = _try_load_backbone_pretrain_into_sparsebev(args.weights)
+        if not ok:
+            raise
+        checkpoint = {}
 
     if 'version' in checkpoint:
         VERSION.name = checkpoint['version']

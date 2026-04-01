@@ -47,8 +47,14 @@ def sampling_4d(sample_points, mlvl_feats, scale_weights, lidar2img, image_h, im
     sample_points = sample_points.reshape(B, Q, T, G * P, 3)
 
     # get the projection matrix
+    # lidar2img 可能只提供了单帧(6 views)的矩阵；为避免可视化/推理时维度不匹配，这里做重复扩展。
+    # 期望的第二维是 T*N。
+    if lidar2img.shape[1] != T * N:
+        rep = int((T * N + lidar2img.shape[1] - 1) // lidar2img.shape[1])
+        lidar2img = lidar2img.repeat(1, rep, 1, 1)[:, : T * N]
+
     lidar2img = lidar2img[:, :, None, None, :, :]  # [B, TN, 1, 1, 4, 4]
-    lidar2img = lidar2img.expand(B, T*N, Q, G * P, 4, 4)
+    lidar2img = lidar2img.expand(B, T * N, Q, G * P, 4, 4)
     lidar2img = lidar2img.reshape(B, T, N, Q, G*P, 4, 4)
 
     # expand the points

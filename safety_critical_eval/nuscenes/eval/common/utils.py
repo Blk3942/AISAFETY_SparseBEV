@@ -20,8 +20,13 @@ def velocity_l2(gt_box: EvalBox, pred_box: EvalBox) -> float:
     return float(np.linalg.norm(np.array(pred_box.velocity) - np.array(gt_box.velocity)))
 
 
-def quaternion_yaw(q: Quaternion) -> float:
-    """Yaw (radians) from quaternion in lidar/global frame."""
+def quaternion_yaw(q) -> float:
+    """Yaw (radians) from quaternion in lidar/global frame.
+
+    safety_critical_eval 的 box.rotation 可能是 list/tuple（wxyz），这里统一转成 Quaternion。
+    """
+    if not isinstance(q, Quaternion):
+        q = Quaternion(q)
     v = np.dot(q.rotation_matrix, np.array([1, 0, 0]))
     return float(np.arctan2(v[1], v[0]))
 
