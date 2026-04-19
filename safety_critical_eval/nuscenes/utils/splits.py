@@ -74,8 +74,11 @@ val = \
      'scene-1060', 'scene-1061', 'scene-1062', 'scene-1063', 'scene-1064', 'scene-1065', 'scene-1066', 'scene-1067',
      'scene-1068', 'scene-1069', 'scene-1070', 'scene-1071', 'scene-1072', 'scene-1073']
 
-mini_train = ['scene-0061', 'scene-0553', 'scene-0655', 'scene-0916', 'scene-1077', 'scene-1094', 'scene-1100', 'scene-0103']
-mini_val = ['scene-0003', 'scene-0012', 'scene-0155', 'scene-0207', 'scene-0454', 'scene-0827', 'scene-0917', 'scene-1075']
+# 与 nuScenes v1.0-mini / offline_nuscenes_eval 一致：8 个 train scene + 2 个 val scene
+mini_train = [
+    'scene-0061', 'scene-0553', 'scene-0655', 'scene-0757', 'scene-0796', 'scene-1077', 'scene-1094', 'scene-1100',
+]
+mini_val = ['scene-0103', 'scene-0916']
 
 
 def create_splits_scenes() -> Dict[str, List[str]]:

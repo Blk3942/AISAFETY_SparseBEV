@@ -3,9 +3,6 @@ import mmcv
 import numpy as np
 from mmdet.datasets.builder import PIPELINES
 from numpy.linalg import inv
-from mmcv.runner import get_dist_info
-
-
 def compose_lidar2img(ego2global_translation_curr,
                       ego2global_rotation_curr,
                       lidar2ego_translation_curr,
@@ -147,11 +144,8 @@ class LoadMultiViewImageFromMultiSweeps(object):
         if self.sweeps_num == 0:
             return results
 
-        world_size = get_dist_info()[1]
-        if world_size == 1 and self.test_mode:
-            return self.load_online(results)
-        else:
-            return self.load_offline(results)
+        # 不再在单卡 test 时走 load_online（该路径不加载历史帧像素，仅适合 FPS；会破坏 num_frames>1 的推理）。
+        return self.load_offline(results)
 
 
 @PIPELINES.register_module()
