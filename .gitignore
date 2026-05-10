@@ -49,5 +49,6 @@ prediction
 submission
 checkpoints
 pretrain
+*.pth
 *.png
 *.jpg

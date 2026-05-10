@@ -4,6 +4,13 @@ Visualize nuScenes camera + BEV: GT vs prediction from a saved results_nusc.json
 
 This avoids rerunning model inference. It also supports overlaying a safety-critical GT
 subset (filtered by safety_max_dist + class_range) for comparison.
+
+PKL mode:
+- If you pass --pkl_ann, the script will use nuscenes_infos_val_sweep.pkl to get:
+  - camera image paths + intrinsics/extrinsics
+  - GT boxes in lidar frame
+- It will still use --results (results_nusc.json) for predictions in global frame.
+- In PKL mode, BEV pointcloud rendering is disabled (no nuScenes JSON tables).
 """
 
 from __future__ import annotations
@@ -79,6 +86,188 @@ def _filter_safety_lidar_boxes(bboxes_lidar: List[Box], safety_max_dist: float, 
         if dist < min(max_d, safety_max_dist):
             out.append(box)
     return out
+
+
+def _safe_join(root: str, path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    p = path.replace("\\", "/")
+    for anchor in ("samples/", "sweeps/"):
+        j = p.find(anchor)
+        if j >= 0:
+            p = p[j:]
+            break
+    p = p.replace("/", os.sep)
+    return os.path.normpath(os.path.join(root, p))
+
+
+def _quat_to_rot(q_wxyz: List[float]) -> np.ndarray:
+    """nuScenes quaternion (w,x,y,z) -> 3x3 rotation matrix."""
+    w, x, y, z = [float(v) for v in q_wxyz]
+    ww, xx, yy, zz = w * w, x * x, y * y, z * z
+    wx, wy, wz = w * x, w * y, w * z
+    xy, xz, yz = x * y, x * z, y * z
+    return np.array(
+        [
+            [ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)],
+            [2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)],
+            [2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _project(points_cam: np.ndarray, K: np.ndarray) -> np.ndarray:
+    x, y, z = points_cam[0], points_cam[1], points_cam[2]
+    z = np.where(z == 0, 1e-6, z)
+    u = (K[0, 0] * x / z) + K[0, 2]
+    v = (K[1, 1] * y / z) + K[1, 2]
+    return np.stack([u, v], axis=0)
+
+
+def _lidar_to_cam(points_l: np.ndarray, R_c2l: np.ndarray, t_c2l: np.ndarray) -> np.ndarray:
+    """sensor2lidar: x_l = R x_c + t => x_c = R^T (x_l - t)"""
+    R_l2c = R_c2l.T
+    return (R_l2c @ (points_l - t_c2l))
+
+
+def _global_to_cam(points_g: np.ndarray, R_s2g: np.ndarray, t_s2g: np.ndarray) -> np.ndarray:
+    """sensor2global: x_g = R x_s + t => x_s = R^T (x_g - t)"""
+    R_g2s = R_s2g.T
+    return (R_g2s @ (points_g - t_s2g))
+
+
+def _rot_z(yaw: float) -> np.ndarray:
+    c = float(np.cos(yaw))
+    s = float(np.sin(yaw))
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+
+
+def _box_corners_center(x: float, y: float, z: float, dx: float, dy: float, dz: float, yaw: float) -> np.ndarray:
+    """(3,8) corners around center."""
+    x_c, y_c, z_c = dx / 2.0, dy / 2.0, dz / 2.0
+    corners = np.array(
+        [
+            [x_c, y_c, z_c],
+            [x_c, -y_c, z_c],
+            [-x_c, -y_c, z_c],
+            [-x_c, y_c, z_c],
+            [x_c, y_c, -z_c],
+            [x_c, -y_c, -z_c],
+            [-x_c, -y_c, -z_c],
+            [-x_c, y_c, -z_c],
+        ],
+        dtype=np.float32,
+    ).T
+    return (_rot_z(yaw) @ corners) + np.array([[x], [y], [z]], dtype=np.float32)
+
+
+def _draw_edges(ax, pts2d: np.ndarray, rgb: Tuple[int, int, int], lw: float):
+    c = np.array(rgb) / 255.0
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+    for a, b in edges:
+        ax.plot([pts2d[0, a], pts2d[0, b]], [pts2d[1, a], pts2d[1, b]], color=c, linewidth=lw)
+
+
+def _load_infos_pkl(pkl_path: str):
+    import pickle
+    with open(pkl_path, 'rb') as f:
+        d = pickle.load(f)
+    infos = d['infos'] if isinstance(d, dict) and 'infos' in d else d
+    token_to_info = {info['token']: info for info in infos}
+    return token_to_info
+
+
+def _viz_pkl_mode(dataroot: str, token_to_info: dict, results_json: dict, sample_token: str, fig, gs, score_thr: float):
+    """
+    PKL mode visualization:
+    - Top: GT (from pkl, lidar->cam projection)
+    - Bottom: Pred (from results json, global->cam projection)
+    - Right BEV panes are placeholders.
+    """
+    info = token_to_info.get(sample_token, None)
+    if info is None:
+        return False
+    cams = info['cams']
+
+    gt_boxes = np.array(info.get('gt_boxes', []), dtype=np.float32)  # (M,7) lidar
+    gt_names = [str(x) for x in info.get('gt_names', [])]
+    valid_flag = info.get('valid_flag', None)
+    if valid_flag is None:
+        valid_mask = np.ones((len(gt_names),), dtype=bool)
+    else:
+        valid_mask = np.array(valid_flag).astype(bool)
+
+    pred_list = results_json.get('results', {}).get(sample_token, [])
+    pred_list = [p for p in pred_list if float(p.get('detection_score', 0.0)) >= score_thr]
+
+    cam_types = [
+        'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
+        'CAM_BACK_RIGHT', 'CAM_BACK', 'CAM_BACK_LEFT',
+    ]
+
+    for cam_id, cam_type in enumerate(cam_types):
+        cam = cams[cam_type]
+        img_path = _safe_join(dataroot, cam['data_path'])
+        img = Image.open(img_path)
+
+        K = np.array(cam['cam_intrinsic'], dtype=np.float32).reshape(3, 3)
+        R_c2l = np.array(cam['sensor2lidar_rotation'], dtype=np.float32).reshape(3, 3)
+        t_c2l = np.array(cam['sensor2lidar_translation'], dtype=np.float32).reshape(3, 1)
+        R_s2g = np.array(cam['sensor2global_rotation'], dtype=np.float32).reshape(3, 3)
+        t_s2g = np.array(cam['sensor2global_translation'], dtype=np.float32).reshape(3, 1)
+
+        r = cam_id // 3
+        c = cam_id % 3
+
+        ax_gt = fig.add_subplot(gs[r, c])
+        ax_gt.imshow(img)
+        ax_gt.axis('off')
+        ax_gt.set_title(cam_type if cam_id > 0 else f'Ground truth\n{cam_type}', fontsize=8)
+
+        for b, name, ok in zip(gt_boxes, gt_names, valid_mask):
+            if not ok:
+                continue
+            x, y, z, dx, dy, dz, yaw = [float(v) for v in b.tolist()]
+            corners_l = _box_corners_center(x, y, z, dx, dy, dz, yaw)
+            corners_c = _lidar_to_cam(corners_l, R_c2l=R_c2l, t_c2l=t_c2l)
+            if float(np.mean(corners_c[2])) <= 0.5:
+                continue
+            pts2d = _project(corners_c, K)
+            col = classname_to_color.get(name, (200, 200, 200))
+            _draw_edges(ax_gt, pts2d, col, lw=1.8)
+
+        ax_pr = fig.add_subplot(gs[r + 2, c])
+        ax_pr.imshow(img)
+        ax_pr.axis('off')
+        ax_pr.set_title(cam_type if cam_id > 0 else f'Prediction\n{cam_type}', fontsize=8)
+
+        for det in pred_list:
+            name = str(det.get('detection_name', ''))
+            center = np.array(det['translation'], dtype=np.float32).reshape(3, 1)
+            w, l, h = [float(x) for x in det['size']]
+            R = _quat_to_rot(det['rotation'])
+            corners_local = _box_corners_center(0, 0, 0, l, w, h, 0.0)
+            corners_g = (R @ corners_local) + center
+            corners_c = _global_to_cam(corners_g, R_s2g=R_s2g, t_s2g=t_s2g)
+            if float(np.mean(corners_c[2])) <= 0.5:
+                continue
+            pts2d = _project(corners_c, K)
+            col = classname_to_color.get(name, (200, 200, 200))
+            _draw_edges(ax_pr, pts2d, col, lw=1.2)
+
+    ax0 = fig.add_subplot(gs[0:2, 3])
+    ax0.axis('off')
+    ax0.set_title('Ground truth\nBEV disabled (PKL mode)', fontsize=8)
+    ax1 = fig.add_subplot(gs[2:4, 3])
+    ax1.axis('off')
+    ax1.set_title('Prediction\nBEV disabled (PKL mode)', fontsize=8)
+
+    return True
 
 
 def _global_box_to_lidar(nusc: NuScenes, sample_token: str, box_global: Box) -> Box:
@@ -335,6 +524,12 @@ def main():
     parser.add_argument('--num_samples', type=int, default=100)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--score_threshold', type=float, default=0.3)
+    parser.add_argument(
+        '--pkl_ann',
+        type=str,
+        default=None,
+        help='启用 PKL 模式：传入 nuscenes_infos_val_sweep.pkl 路径（适用于 dataroot 下无 v1.0-trainval 表）',
+    )
     parser.add_argument('--viz_safety_gt', action='store_true')
     parser.add_argument(
         '--safety_cfg',
@@ -345,7 +540,6 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    nusc = NuScenes(version=args.version, dataroot=args.dataroot, verbose=False)
     with open(args.results, 'r') as f:
         results_json = json.load(f)
 
@@ -358,26 +552,42 @@ def main():
     else:
         safety_max_dist, class_range = None, None
 
-    for idx, sample_token in enumerate(picked):
-        bboxes_gt = _load_gt_boxes_lidar(nusc, sample_token)
-        bboxes_pred = _load_pred_boxes_lidar(nusc, results_json, sample_token, args.score_threshold)
+    if args.pkl_ann:
+        pkl_path = args.pkl_ann if os.path.isabs(args.pkl_ann) else os.path.join(args.dataroot, args.pkl_ann)
+        token_to_info = _load_infos_pkl(pkl_path)
+        for idx, sample_token in enumerate(picked):
+            fig = plt.figure(figsize=(15.5, 10))
+            gs = GridSpec(4, 4, figure=fig, hspace=0.15, wspace=0.05)
+            ok = _viz_pkl_mode(args.dataroot, token_to_info, results_json, sample_token, fig, gs, args.score_threshold)
+            if not ok:
+                plt.close()
+                continue
+            fig.subplots_adjust(left=0.02, right=0.98, top=0.96, bottom=0.02, hspace=0.12, wspace=0.06)
+            out_path = os.path.join(args.out_dir, f'gt_pred_{idx:04d}.jpg')
+            plt.savefig(out_path, dpi=160, bbox_inches='tight')
+            plt.close()
+    else:
+        nusc = NuScenes(version=args.version, dataroot=args.dataroot, verbose=False)
+        for idx, sample_token in enumerate(picked):
+            bboxes_gt = _load_gt_boxes_lidar(nusc, sample_token)
+            bboxes_pred = _load_pred_boxes_lidar(nusc, results_json, sample_token, args.score_threshold)
 
-        fig = plt.figure(figsize=(15.5, 10))
-        gs = GridSpec(4, 4, figure=fig, hspace=0.15, wspace=0.05)
+            fig = plt.figure(figsize=(15.5, 10))
+            gs = GridSpec(4, 4, figure=fig, hspace=0.15, wspace=0.05)
 
-        ctx_gt = _create_block_axes(nusc, sample_token, fig, gs, row_start=0, block_title='Ground truth')
-        _render_boxes_on_block(ctx_gt, bboxes_gt, linewidth=2.0, override_rgb=None)
-        if args.viz_safety_gt and safety_max_dist is not None:
-            bboxes_safety = _filter_safety_lidar_boxes(bboxes_gt, safety_max_dist, class_range or {})
-            _render_boxes_on_block(ctx_gt, bboxes_safety, linewidth=2.2, override_rgb=SAFETY_GT_COLOR)
+            ctx_gt = _create_block_axes(nusc, sample_token, fig, gs, row_start=0, block_title='Ground truth')
+            _render_boxes_on_block(ctx_gt, bboxes_gt, linewidth=2.0, override_rgb=None)
+            if args.viz_safety_gt and safety_max_dist is not None:
+                bboxes_safety = _filter_safety_lidar_boxes(bboxes_gt, safety_max_dist, class_range or {})
+                _render_boxes_on_block(ctx_gt, bboxes_safety, linewidth=2.2, override_rgb=SAFETY_GT_COLOR)
 
-        ctx_pred = _create_block_axes(nusc, sample_token, fig, gs, row_start=2, block_title='Prediction')
-        _render_boxes_on_block(ctx_pred, bboxes_pred, linewidth=1.5, override_rgb=None)
+            ctx_pred = _create_block_axes(nusc, sample_token, fig, gs, row_start=2, block_title='Prediction')
+            _render_boxes_on_block(ctx_pred, bboxes_pred, linewidth=1.5, override_rgb=None)
 
-        fig.subplots_adjust(left=0.02, right=0.98, top=0.96, bottom=0.02, hspace=0.12, wspace=0.06)
-        out_path = os.path.join(args.out_dir, f'gt_pred_{idx:04d}.jpg')
-        plt.savefig(out_path, dpi=160, bbox_inches='tight')
-        plt.close()
+            fig.subplots_adjust(left=0.02, right=0.98, top=0.96, bottom=0.02, hspace=0.12, wspace=0.06)
+            out_path = os.path.join(args.out_dir, f'gt_pred_{idx:04d}.jpg')
+            plt.savefig(out_path, dpi=160, bbox_inches='tight')
+            plt.close()
 
 
 if __name__ == '__main__':
