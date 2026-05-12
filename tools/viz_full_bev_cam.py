@@ -13,8 +13,15 @@
         --score_thr 0.3 \
         --safety_range 30 \
         --out /tmp/viz_full_28061.png
+
+    # 随机抽 N 个 gt_sample（需 MySQL），默认输出目录为桌面 viz_full_bev_batch
+    python3 tools/viz_full_bev_cam.py \
+        --num_random_samples 200 --seed 0 \
+        --dataroot E:/Data/Nuscenes/Full
 """
-import argparse, json, math, time
+import argparse, json, math, os, random, time
+from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -344,6 +351,82 @@ def draw_bev(ax, boxes, ego, title, bev_range, safety_r, is_pred=False):
         sp.set_edgecolor('#222244')
 
 
+def visualize_one(conn, args, sample_id: int, out_path: str, verbose: bool = True) -> bool:
+    """单样本渲染；成功返回 True。调用方负责保证 out_path 目录已存在。"""
+    t0 = time.time()
+    ego, gt_boxes, pred_boxes, cams, meta = fetch_data(conn, sample_id, args.score_thr)
+    if ego is None or meta is None or not cams:
+        if verbose:
+            print(f'  [skip] sample_id={sample_id}: missing ego/meta/cameras')
+        return False
+
+    if verbose:
+        print(f'  sample_id={sample_id}  GT={len(gt_boxes)}  Pred={len(pred_boxes)}  cams={len(cams)}')
+
+    dataroot = args.dataroot.rstrip('/\\')
+    for _ch, c in cams.items():
+        c['filepath'] = f'{dataroot}/{c["filename"]}'
+
+    fig = plt.figure(figsize=(30, 15), facecolor='#07070F')
+    outer = GridSpec(2, 1, figure=fig, hspace=0.10,
+                     top=0.94, bottom=0.03, left=0.01, right=0.99)
+
+    section_cfg = [
+        ('GT Ground Truth', gt_boxes, False),
+        (f'Prediction  (score ≥ {args.score_thr:.2f})', pred_boxes, True),
+    ]
+
+    for sec_idx, (sec_label, boxes, is_pred) in enumerate(section_cfg):
+        inner = GridSpecFromSubplotSpec(
+            2, 4, subplot_spec=outer[sec_idx],
+            wspace=0.015, hspace=0.015,
+            width_ratios=[1.78, 1.78, 1.78, 2.0],
+        )
+        for row_idx, cam_row in enumerate(CAM_ROWS):
+            for col_idx, channel in enumerate(cam_row):
+                ax = fig.add_subplot(inner[row_idx, col_idx])
+                short = channel.replace('CAM_', '').replace('_', ' ')
+                if channel in cams:
+                    draw_camera_view(ax, cams[channel], boxes, ego, short)
+                else:
+                    ax.set_facecolor('#111122')
+                    ax.text(0.5, 0.5, channel, ha='center', va='center',
+                            color='#555577', transform=ax.transAxes, fontsize=8)
+                    ax.axis('off')
+
+        ax_bev = fig.add_subplot(inner[:, 3])
+        draw_bev(ax_bev, boxes, ego, sec_label,
+                 args.bev_range, args.safety_range, is_pred)
+
+        fig.text(0.005, 0.96 - sec_idx * 0.49,
+                 '▌ ' + ('Ground Truth' if sec_idx == 0 else f'Prediction  (score ≥ {args.score_thr:.2f})'),
+                 color='#55FF88' if sec_idx == 0 else '#55AAFF',
+                 fontsize=10, fontweight='bold',
+                 transform=fig.transFigure)
+
+    token_short = (meta.get('sample_token') or '')[:20] + '…'
+    fig.suptitle(
+        f'SparseBEV 检测可视化  |  sample {token_short}  '
+        f'{meta["name"]}  {meta["log_location"]}  {meta["log_date"]}',
+        color='#CCCCDD', fontsize=11, y=0.975,
+    )
+
+    plt.savefig(out_path, dpi=130, bbox_inches='tight',
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    if verbose:
+        print(f'    → {out_path}  ({time.time()-t0:.1f}s)')
+    return True
+
+
+def _fetch_all_gt_sample_ids(conn):
+    cur = conn.cursor()
+    cur.execute('SELECT id FROM ground_truth_sample ORDER BY id')
+    rows = cur.fetchall()
+    cur.close()
+    return [int(r['id']) for r in rows]
+
+
 # ─────────────────────────── 主函数 ────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
@@ -358,10 +441,23 @@ def main():
     ap.add_argument('--password',     default='')
     ap.add_argument('--database',     default='safetyai_sparsebev')
     ap.add_argument('--out',          default='/tmp/viz_full.png')
+    ap.add_argument(
+        '--num_random_samples',
+        type=int,
+        default=0,
+        help='>0 时从 ground_truth_sample 随机抽 N 条，忽略单样本 --out，改用 --out_dir',
+    )
+    ap.add_argument(
+        '--out_dir',
+        type=str,
+        default=None,
+        help='批量模式输出目录；默认桌面下 viz_full_bev_batch',
+    )
+    ap.add_argument('--seed', type=int, default=0, help='随机抽样种子')
     args = ap.parse_args()
 
     t0 = time.time()
-    print('连接数据库并读取数据...')
+    print('连接数据库...')
     conn = pymysql.connect(
         host=args.host, port=args.port,
         user=args.user, password=args.password,
@@ -370,75 +466,40 @@ def main():
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
     )
-    ego, gt_boxes, pred_boxes, cams, meta = fetch_data(
-        conn, args.sample_id, args.score_thr)
-    conn.close()
 
-    print(f'  GT boxes     : {len(gt_boxes)}')
-    print(f'  Pred boxes   : {len(pred_boxes)} (score≥{args.score_thr})')
-    print(f'  Cameras      : {sorted(cams.keys())}')
-    print(f'  Scene        : {meta["name"]}  {meta["log_location"]}  {meta["log_date"]}')
+    try:
+        if args.num_random_samples and args.num_random_samples > 0:
+            out_dir = args.out_dir
+            if not out_dir:
+                out_dir = str(Path.home() / 'Desktop' / 'viz_full_bev_batch')
+            os.makedirs(out_dir, exist_ok=True)
 
-    # 预先读取图片文件路径（加入 dataroot）
-    for ch, c in cams.items():
-        c['filepath'] = f'{args.dataroot}/{c["filename"]}'
+            all_ids = _fetch_all_gt_sample_ids(conn)
+            if not all_ids:
+                raise RuntimeError('ground_truth_sample 表为空，无法抽样')
 
-    # ── 创建图 ──
-    print('生成可视化...')
-    fig = plt.figure(figsize=(30, 15), facecolor='#07070F')
+            random.seed(args.seed)
+            k = min(args.num_random_samples, len(all_ids))
+            picked = sorted(random.sample(all_ids, k=k))
+            print(f'随机抽取 {k} / {len(all_ids)} 个样本，输出目录: {out_dir}')
 
-    outer = GridSpec(2, 1, figure=fig, hspace=0.10,
-                     top=0.94, bottom=0.03, left=0.01, right=0.99)
-
-    section_cfg = [
-        ('GT Ground Truth', gt_boxes, False),
-        (f'Prediction  (score ≥ {args.score_thr:.2f})', pred_boxes, True),
-    ]
-
-    for sec_idx, (sec_label, boxes, is_pred) in enumerate(section_cfg):
-        # 2行 × 4列：前3列相机，第4列BEV（跨两行）
-        inner = GridSpecFromSubplotSpec(
-            2, 4, subplot_spec=outer[sec_idx],
-            wspace=0.015, hspace=0.015,
-            width_ratios=[1.78, 1.78, 1.78, 2.0],
-        )
-
-        # 6 路相机
-        for row_idx, cam_row in enumerate(CAM_ROWS):
-            for col_idx, channel in enumerate(cam_row):
-                ax = fig.add_subplot(inner[row_idx, col_idx])
-                short = channel.replace('CAM_', '').replace('_', ' ')
-                if channel in cams:
-                    draw_camera_view(ax, cams[channel], boxes, ego, short)
-                else:
-                    ax.set_facecolor('#111122')
-                    ax.text(0.5, 0.5, channel, ha='center', va='center',
-                            color='#555577', transform=ax.transAxes, fontsize=8)
-                    ax.axis('off')
-
-        # BEV（跨两行）
-        ax_bev = fig.add_subplot(inner[:, 3])
-        draw_bev(ax_bev, boxes, ego, sec_label,
-                 args.bev_range, args.safety_range, is_pred)
-
-        # 分区标题
-        fig.text(0.005, 0.96 - sec_idx * 0.49,
-                 '▌ ' + ('Ground Truth' if sec_idx == 0 else f'Prediction  (score ≥ {args.score_thr:.2f})'),
-                 color='#55FF88' if sec_idx == 0 else '#55AAFF',
-                 fontsize=10, fontweight='bold',
-                 transform=fig.transFigure)
-
-    # 全图标题
-    token_short = meta['sample_token'][:20] + '…'
-    fig.suptitle(
-        f'SparseBEV 检测可视化  |  sample {token_short}  '
-        f'{meta["name"]}  {meta["log_location"]}  {meta["log_date"]}',
-        color='#CCCCDD', fontsize=11, y=0.975,
-    )
-
-    plt.savefig(args.out, dpi=130, bbox_inches='tight',
-                facecolor=fig.get_facecolor())
-    print(f'保存 → {args.out}  ({time.time()-t0:.1f}s)')
+            ok_n = 0
+            for sid in picked:
+                out_path = os.path.join(out_dir, f'viz_full_bev_{sid:06d}.png')
+                if visualize_one(conn, args, sid, out_path, verbose=True):
+                    ok_n += 1
+            print(f'完成: 成功 {ok_n}/{k}，总耗时 {time.time()-t0:.1f}s')
+        else:
+            out_path = args.out
+            if out_path and not os.path.isabs(out_path):
+                out_path = os.path.abspath(out_path)
+            parent = os.path.dirname(out_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            visualize_one(conn, args, args.sample_id, out_path, verbose=True)
+            print(f'总计 {time.time()-t0:.1f}s')
+    finally:
+        conn.close()
 
 
 if __name__ == '__main__':
